@@ -1,351 +1,181 @@
 import streamlit as st
 import os
-import json
-import subprocess
 import tempfile
-from datetime import datetime
-from pathlib import Path
+import subprocess
 import requests
+from pathlib import Path
+from datetime import datetime
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
 
-st.set_page_config(
-    page_title="Video Transcriber with Timestamps",
-    page_icon="🎬",
-    layout="wide"
-)
+st.set_page_config(page_title="Video Transcriber", page_icon="🎬", layout="wide")
 
+
+# -----------------------------
+# CLASS: Video Transcriber
+# -----------------------------
 class VideoTranscriber:
     def __init__(self, openai_api_key: str):
-        self.openai_api_key = openai_api_key
-    
-    def extract_audio_from_video(self, video_path: str, audio_path: str) -> bool:
+        self.api_key = openai_api_key
+
+    # -----------------------------
+    # Extract audio from video
+    # -----------------------------
+    def extract_audio(self, video_path: str, audio_path: str):
         try:
             cmd = [
-                'ffmpeg', '-i', video_path,
-                '-vn',
-                '-acodec', 'pcm_s16le',
-                '-ar', '16000',
-                '-ac', '1',
-                '-y',
+                "ffmpeg", "-i", video_path,
+                "-vn",
+                "-acodec", "pcm_s16le",
+                "-ar", "16000",
+                "-ac", "1",
+                "-y",
                 audio_path
             ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            
-            if result.returncode == 0 and os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
-                return True
-            else:
-                st.error(f"FFmpeg extraction failed: {result.stderr}")
-                return False
-                
-        except Exception as e:
-            st.error(f"Failed to extract audio from video: {e}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            return os.path.exists(audio_path) and os.path.getsize(audio_path) > 0
+        except Exception:
             return False
-    
-    def optimize_audio_for_whisper(self, audio_path: str) -> str:
-        try:
-            optimized_path = audio_path.replace('.wav', '_optimized.wav')
-            
-            cmd = [
-                'ffmpeg', '-i', audio_path,
-                '-af', 'highpass=f=80,lowpass=f=8000,volume=1.5',
-                '-acodec', 'pcm_s16le',
-                '-ar', '16000',
-                '-ac', '1',
-                '-y',
-                optimized_path
-            ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            
-            if result.returncode == 0 and os.path.exists(optimized_path):
-                if os.path.exists(audio_path):
-                    try:
-                        os.unlink(audio_path)
-                    except:
-                        pass
-                os.rename(optimized_path, audio_path)
-                return audio_path
-            else:
-                if os.path.exists(optimized_path):
-                    try:
-                        os.unlink(optimized_path)
-                    except:
-                        pass
-                return audio_path
-                
-        except subprocess.TimeoutExpired:
-            return audio_path
-        except Exception as e:
-            return audio_path
-    
-    def transcribe_audio_with_whisper(self, audio_path: str):
-        try:
-            optimized_path = self.optimize_audio_for_whisper(audio_path)
-            
-            url = "https://api.openai.com/v1/audio/transcriptions"
-            
-            headers = {
-                "Authorization": f"Bearer {self.openai_api_key}"
-            }
-            
-            with open(optimized_path, 'rb') as audio_file:
-                files = {
-                    'file': (os.path.basename(audio_path), audio_file, 'audio/wav'),
-                    'model': (None, 'whisper-1'),
-                    'response_format': (None, 'verbose_json'),
-                    'timestamp_granularities': (None, '["segment"]')
-                }
-                
-                file_size = os.path.getsize(optimized_path)
-                st.info(f"Sending audio to OpenAI Whisper: {file_size / 1024 / 1024:.2f} MB")
-                
-                response = requests.post(url, headers=headers, files=files, timeout=300)
-                response.raise_for_status()
-                
-                result = response.json()
-                
-                full_text = result.get("text", "")
-                segments = result.get("segments", [])
-                timestamped_text = ""
-                
-                for segment in segments:
-                    start_time = segment.get("start", 0)
-                    end_time = segment.get("end", 0)
-                    text = segment.get("text", "").strip()
-                    confidence = segment.get("avg_logprob", 0)
-                    
-                    start_formatted = f"{int(start_time//60):02d}:{int(start_time%60):02d}"
-                    end_formatted = f"{int(end_time//60):02d}:{int(end_time%60):02d}"
-                    
-                    confidence_indicator = " [LOW_CONFIDENCE]" if confidence < -0.5 else ""
-                    timestamped_text += f"[{start_formatted} - {end_formatted}] {text}{confidence_indicator}\n"
-                
-                return {
-                    'success': True,
-                    'transcript': full_text,
-                    'timestamped_transcript': timestamped_text.strip(),
-                    'segments_count': len(segments),
-                    'segments': segments,
-                    'error': None
-                }
-                
-        except Exception as e:
-            return {
-                'success': False,
-                'transcript': '',
-                'timestamped_transcript': '',
-                'segments_count': 0,
-                'segments': [],
-                'error': str(e)
-            }
-    
-    def convert_audio_to_wav(self, audio_path: str, output_path: str) -> bool:
+
+    # -----------------------------
+    # Convert any audio to WAV 
+    # -----------------------------
+    def convert_audio_to_wav(self, input_path: str, output_path: str):
         try:
             cmd = [
-                'ffmpeg', '-i', audio_path,
-                '-acodec', 'pcm_s16le',
-                '-ar', '16000',
-                '-ac', '1',
-                '-y',
+                "ffmpeg", "-i", input_path,
+                "-acodec", "pcm_s16le",
+                "-ar", "16000",
+                "-ac", "1",
+                "-y",
                 output_path
             ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            
-            if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                return True
-            else:
-                st.error(f"FFmpeg conversion failed: {result.stderr}")
-                return False
-                
-        except Exception as e:
-            st.error(f"Failed to convert audio: {e}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            return os.path.exists(output_path)
+        except Exception:
             return False
-    
-    def transcribe_video(self, file_path: str, file_extension: str):
-        if not os.path.exists(file_path):
-            return {
-                'success': False,
-                'error': f'File not found: {file_path}'
-            }
-        
-        file_name = Path(file_path).stem
-        safe_file_name = "".join(c for c in file_name if c.isalnum() or c in (' ', '-', '_')).strip()[:50]
-        temp_audio_path = os.path.join(tempfile.gettempdir(), f'{safe_file_name}_audio_{os.getpid()}.wav')
-        
-        try:
-            video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv']
-            audio_extensions = ['.mp3', '.wav', '.m4a', '.aac']
-            
-            file_path_lower = file_path.lower()
-            is_video = any(file_path_lower.endswith(ext) for ext in video_extensions)
-            is_audio = any(file_path_lower.endswith(ext) for ext in audio_extensions)
-            
-            if is_video:
-                with st.spinner("Extracting audio from video..."):
-                    if not self.extract_audio_from_video(file_path, temp_audio_path):
-                        return {
-                            'success': False,
-                            'error': 'Failed to extract audio from video'
-                        }
-            elif is_audio:
-                with st.spinner("Converting audio to WAV format..."):
-                    if not self.convert_audio_to_wav(file_path, temp_audio_path):
-                        return {
-                            'success': False,
-                            'error': 'Failed to convert audio file'
-                        }
-            else:
-                return {
-                    'success': False,
-                    'error': 'Unsupported file format'
-                }
-            
-            with st.spinner("Transcribing audio with Whisper..."):
-                transcription_result = self.transcribe_audio_with_whisper(temp_audio_path)
-            
-            if not transcription_result['success']:
-                return {
-                    'success': False,
-                    'error': transcription_result.get('error', 'Transcription failed')
-                }
-            
-            return {
-                'success': True,
-                'transcript': transcription_result['transcript'],
-                'timestamped_transcript': transcription_result['timestamped_transcript'],
-                'segments_count': transcription_result['segments_count'],
-                'segments': transcription_result['segments'],
-                'error': None
-            }
-            
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-        
-        finally:
-            try:
-                if os.path.exists(temp_audio_path):
-                    os.unlink(temp_audio_path)
-                optimized_path = temp_audio_path.replace('.wav', '_optimized.wav')
-                if os.path.exists(optimized_path):
-                    os.unlink(optimized_path)
-            except:
-                pass
 
-st.title("🎬 Video Transcriber with Timestamps")
+    # -----------------------------
+    # NEW OpenAI Transcription API
+    # -----------------------------
+    def transcribe_audio(self, wav_path: str):
+        url = "https://api.openai.com/v1/responses"
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}"
+        }
+
+        with open(wav_path, "rb") as f:
+            files = {
+                "model": (None, "gpt-4o-mini-transcribe"),
+                "input_audio": ("audio.wav", f, "audio/wav"),
+                "response_format": (None, "text")
+            }
+
+            response = requests.post(url, headers=headers, files=files)
+
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "error": response.text
+            }
+
+        text_output = response.json()["output"][0]["content"][0]["text"]
+
+        return {
+            "success": True,
+            "transcript": text_output
+        }
+
+    # -----------------------------
+    # Main pipeline
+    # -----------------------------
+    def process_file(self, file_path: str, extension: str):
+        tmp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
+
+        is_video = extension in [".mp4", ".mov", ".avi", ".mkv", ".webm"]
+        is_audio = extension in [".mp3", ".wav", ".m4a", ".aac"]
+
+        # Extract or convert audio
+        if is_video:
+            ok = self.extract_audio(file_path, tmp_wav)
+        else:
+            ok = self.convert_audio_to_wav(file_path, tmp_wav)
+
+        if not ok:
+            return {"success": False, "error": "Audio extraction failed"}
+
+        # Transcribe
+        result = self.transcribe_audio(tmp_wav)
+
+        # Cleanup
+        try:
+            os.remove(tmp_wav)
+        except:
+            pass
+
+        return result
+
+
+# -----------------------------
+# STREAMLIT UI
+# -----------------------------
+st.title("🎬 Video / Audio Transcriber (OpenAI 2025 API)")
 
 api_key = os.getenv("OPEN_API_KEY")
 if not api_key:
-    st.error("❌ OPEN_API_KEY not found in .env file. Please add it to your .env file.")
+    st.error("❌ OPEN_API_KEY missing in .env file.")
     st.stop()
 
 uploaded_file = st.file_uploader(
-    "Upload Video or Audio File",
-    type=['mp4', 'avi', 'mov', 'mkv', 'webm', 'flv', 'wmv', 'mp3', 'wav', 'm4a', 'aac'],
-    help="Upload a video or audio file to transcribe"
+    "Upload Video or Audio",
+    type=["mp4", "avi", "mov", "mkv", "webm", "mp3", "wav", "m4a", "aac"]
 )
 
-if uploaded_file is not None:
-    file_size_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
-    
-    if file_size_mb > 100:
-        st.error(f"❌ File too large: {file_size_mb:.2f} MB. Maximum size is 100 MB.")
-    else:
-        file_ext = os.path.splitext(uploaded_file.name)[1]
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-            tmp_file.write(uploaded_file.getvalue())
-            tmp_file_path = tmp_file.name
-        
-        try:
-            file_extension = os.path.splitext(uploaded_file.name)[1].lower()
-            file_type = "🎵 Audio" if file_extension in ['.mp3', '.wav', '.m4a', '.aac'] else "📹 Video"
-            st.info(f"{file_type} Processing: {uploaded_file.name} ({file_size_mb:.2f} MB)")
-            
-            transcriber = VideoTranscriber(api_key)
-            result = transcriber.transcribe_video(tmp_file_path, file_extension)
-            
-            if result['success']:
-                st.success("✅ Transcription completed successfully!")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Total Segments", result['segments_count'])
-                with col2:
-                    st.metric("Transcript Length", f"{len(result['transcript'])} characters")
-                
-                st.header("📄 Timestamped Transcript")
-                st.text_area(
-                    "Timestamped Transcript",
-                    value=result['timestamped_transcript'],
-                    height=400,
-                    label_visibility="collapsed"
-                )
-                
-                st.header("📝 Full Transcript (No Timestamps)")
-                st.text_area(
-                    "Full Transcript",
-                    value=result['transcript'],
-                    height=300,
-                    label_visibility="collapsed"
-                )
-                
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                video_name = Path(uploaded_file.name).stem
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    txt_content = f"Video Transcript: {uploaded_file.name}\n"
-                    txt_content += f"Generated: {datetime.now().isoformat()}\n"
-                    txt_content += f"Total segments: {result['segments_count']}\n"
-                    txt_content += "=" * 80 + "\n\n"
-                    txt_content += "TIMESTAMPED TRANSCRIPT:\n"
-                    txt_content += "-" * 80 + "\n"
-                    txt_content += result['timestamped_transcript']
-                    txt_content += "\n\n" + "=" * 80 + "\n\n"
-                    txt_content += "FULL TRANSCRIPT (NO TIMESTAMPS):\n"
-                    txt_content += "-" * 80 + "\n"
-                    txt_content += result['transcript']
-                    
-                    st.download_button(
-                        label="📥 Download Text File",
-                        data=txt_content,
-                        file_name=f"{video_name}_transcript_{timestamp}.txt",
-                        mime="text/plain"
-                    )
-                
-                with col2:
-                    json_data = {
-                        'video_file': uploaded_file.name,
-                        'generated_at': datetime.now().isoformat(),
-                        'transcript': result['transcript'],
-                        'timestamped_transcript': result['timestamped_transcript'],
-                        'segments_count': result['segments_count'],
-                        'segments': result['segments']
-                    }
-                    
-                    st.download_button(
-                        label="📥 Download JSON File",
-                        data=json.dumps(json_data, indent=2, ensure_ascii=False),
-                        file_name=f"{video_name}_transcript_{timestamp}.json",
-                        mime="application/json"
-                    )
-                
-            else:
-                st.error(f"❌ Transcription failed: {result.get('error', 'Unknown error')}")
-        
-        finally:
-            try:
-                if os.path.exists(tmp_file_path):
-                    os.unlink(tmp_file_path)
-            except:
-                pass
+if uploaded_file:
+    file_ext = Path(uploaded_file.name).suffix.lower()
 
+    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+        tmp.write(uploaded_file.getvalue())
+        tmp_path = tmp.name
+
+    transcriber = VideoTranscriber(api_key)
+
+    with st.spinner("Processing file..."):
+        result = transcriber.process_file(tmp_path, file_ext)
+
+    # Cleanup
+    try:
+        os.remove(tmp_path)
+    except:
+        pass
+
+    # Show result
+    if result["success"]:
+        transcript = result["transcript"]
+
+        st.success("✅ Transcription complete!")
+        st.text_area("Transcript", transcript, height=400)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_root = Path(uploaded_file.name).stem
+
+        st.download_button(
+            "📥 Download Transcript (.txt)",
+            transcript,
+            file_name=f"{file_root}_transcript_{timestamp}.txt"
+        )
+
+        st.download_button(
+            "📥 Download Transcript (.json)",
+            json.dumps({"transcript": transcript}, indent=2),
+            file_name=f"{file_root}_transcript_{timestamp}.json"
+        )
+
+    else:
+        st.error(f"❌ Error: {result['error']}")
 else:
-    st.info("👆 Please upload a video file to get started")
+    st.info("Upload a video/audio file to begin.")
