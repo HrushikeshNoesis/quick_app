@@ -32,7 +32,7 @@ class VideoTranscriber:
                 audio_path
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             
             if result.returncode == 0 and os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
                 return True
@@ -58,14 +58,26 @@ class VideoTranscriber:
                 optimized_path
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             
             if result.returncode == 0 and os.path.exists(optimized_path):
-                os.replace(optimized_path, audio_path)
+                if os.path.exists(audio_path):
+                    try:
+                        os.unlink(audio_path)
+                    except:
+                        pass
+                os.rename(optimized_path, audio_path)
                 return audio_path
             else:
+                if os.path.exists(optimized_path):
+                    try:
+                        os.unlink(optimized_path)
+                    except:
+                        pass
                 return audio_path
                 
+        except subprocess.TimeoutExpired:
+            return audio_path
         except Exception as e:
             return audio_path
     
@@ -130,23 +142,67 @@ class VideoTranscriber:
                 'error': str(e)
             }
     
-    def transcribe_video(self, video_path: str):
-        if not os.path.exists(video_path):
+    def convert_audio_to_wav(self, audio_path: str, output_path: str) -> bool:
+        try:
+            cmd = [
+                'ffmpeg', '-i', audio_path,
+                '-acodec', 'pcm_s16le',
+                '-ar', '16000',
+                '-ac', '1',
+                '-y',
+                output_path
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return True
+            else:
+                st.error(f"FFmpeg conversion failed: {result.stderr}")
+                return False
+                
+        except Exception as e:
+            st.error(f"Failed to convert audio: {e}")
+            return False
+    
+    def transcribe_video(self, file_path: str, file_extension: str):
+        if not os.path.exists(file_path):
             return {
                 'success': False,
-                'error': f'Video file not found: {video_path}'
+                'error': f'File not found: {file_path}'
             }
         
-        video_name = Path(video_path).stem
-        temp_audio_path = os.path.join(tempfile.gettempdir(), f'{video_name}_audio.wav')
+        file_name = Path(file_path).stem
+        safe_file_name = "".join(c for c in file_name if c.isalnum() or c in (' ', '-', '_')).strip()[:50]
+        temp_audio_path = os.path.join(tempfile.gettempdir(), f'{safe_file_name}_audio_{os.getpid()}.wav')
         
         try:
-            with st.spinner("Extracting audio from video..."):
-                if not self.extract_audio_from_video(video_path, temp_audio_path):
-                    return {
-                        'success': False,
-                        'error': 'Failed to extract audio from video'
-                    }
+            video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv']
+            audio_extensions = ['.mp3', '.wav', '.m4a', '.aac']
+            
+            file_path_lower = file_path.lower()
+            is_video = any(file_path_lower.endswith(ext) for ext in video_extensions)
+            is_audio = any(file_path_lower.endswith(ext) for ext in audio_extensions)
+            
+            if is_video:
+                with st.spinner("Extracting audio from video..."):
+                    if not self.extract_audio_from_video(file_path, temp_audio_path):
+                        return {
+                            'success': False,
+                            'error': 'Failed to extract audio from video'
+                        }
+            elif is_audio:
+                with st.spinner("Converting audio to WAV format..."):
+                    if not self.convert_audio_to_wav(file_path, temp_audio_path):
+                        return {
+                            'success': False,
+                            'error': 'Failed to convert audio file'
+                        }
+            else:
+                return {
+                    'success': False,
+                    'error': 'Unsupported file format'
+                }
             
             with st.spinner("Transcribing audio with Whisper..."):
                 transcription_result = self.transcribe_audio_with_whisper(temp_audio_path)
@@ -176,6 +232,9 @@ class VideoTranscriber:
             try:
                 if os.path.exists(temp_audio_path):
                     os.unlink(temp_audio_path)
+                optimized_path = temp_audio_path.replace('.wav', '_optimized.wav')
+                if os.path.exists(optimized_path):
+                    os.unlink(optimized_path)
             except:
                 pass
 
@@ -187,24 +246,29 @@ if not api_key:
     st.stop()
 
 uploaded_file = st.file_uploader(
-    "Upload Video File",
-    type=['mp4', 'avi', 'mov', 'mkv', 'webm', 'flv', 'wmv'],
-    help="Upload a video file to transcribe"
+    "Upload Video or Audio File",
+    type=['mp4', 'avi', 'mov', 'mkv', 'webm', 'flv', 'wmv', 'mp3', 'wav', 'm4a', 'aac'],
+    help="Upload a video or audio file to transcribe"
 )
 
 if uploaded_file is not None:
-    if not api_key:
-        st.error("❌ Please enter your OpenAI API key in the sidebar")
+    file_size_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
+    
+    if file_size_mb > 100:
+        st.error(f"❌ File too large: {file_size_mb:.2f} MB. Maximum size is 100 MB.")
     else:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+        file_ext = os.path.splitext(uploaded_file.name)[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
             tmp_file.write(uploaded_file.getvalue())
             tmp_file_path = tmp_file.name
         
         try:
-            st.info(f"📹 Processing: {uploaded_file.name}")
+            file_extension = os.path.splitext(uploaded_file.name)[1].lower()
+            file_type = "🎵 Audio" if file_extension in ['.mp3', '.wav', '.m4a', '.aac'] else "📹 Video"
+            st.info(f"{file_type} Processing: {uploaded_file.name} ({file_size_mb:.2f} MB)")
             
             transcriber = VideoTranscriber(api_key)
-            result = transcriber.transcribe_video(tmp_file_path)
+            result = transcriber.transcribe_video(tmp_file_path, file_extension)
             
             if result['success']:
                 st.success("✅ Transcription completed successfully!")
