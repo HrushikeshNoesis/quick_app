@@ -6,6 +6,9 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 st.set_page_config(
     page_title="Video Transcriber with Timestamps",
@@ -178,12 +181,10 @@ class VideoTranscriber:
 
 st.title("🎬 Video Transcriber with Timestamps")
 
-st.sidebar.header("⚙️ Configuration")
-api_key = st.sidebar.text_input(
-    "OpenAI API Key",
-    type="password",
-    help="Enter your OpenAI API key"
-)
+api_key = os.getenv("OPEN_API_KEY")
+if not api_key:
+    st.error("❌ OPEN_API_KEY not found in .env file. Please add it to your .env file.")
+    st.stop()
 
 uploaded_file = st.file_uploader(
     "Upload Video File",
