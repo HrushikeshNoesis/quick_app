@@ -7,9 +7,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
+
 
 st.set_page_config(
     page_title="",
@@ -55,8 +54,7 @@ def needs_conversion(file_path: str) -> bool:
                    '-of', 'json', file_path]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
-                import json as json_lib
-                probe_data = json_lib.loads(result.stdout)
+                probe_data = json.loads(result.stdout)
                 streams = probe_data.get('streams', [])
                 if streams:
                     sample_rate = int(streams[0].get('sample_rate', 0))
