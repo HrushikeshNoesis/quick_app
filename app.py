@@ -3,6 +3,7 @@ import os
 import json
 import subprocess
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 import requests
@@ -34,36 +35,83 @@ def cleanup_file(path: str):
         pass
 
 def format_timestamp(seconds: float) -> str:
-    """Format seconds to MM:SS.mmm format"""
-    minutes = int(seconds // 60)
+    """Format seconds to HH:MM:SS.mmm format"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
     millis = int((seconds % 1) * 1000)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
     return f"{minutes:02d}:{secs:02d}.{millis:03d}"
+
+def needs_conversion(file_path: str) -> bool:
+    """Check if file needs conversion to WAV"""
+    ext = Path(file_path).suffix.lower()
+    if ext == '.wav':
+        # Check if it's already in the right format (16kHz mono)
+        try:
+            cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a:0', 
+                   '-show_entries', 'stream=sample_rate,channels', 
+                   '-of', 'json', file_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                import json as json_lib
+                probe_data = json_lib.loads(result.stdout)
+                streams = probe_data.get('streams', [])
+                if streams:
+                    sample_rate = int(streams[0].get('sample_rate', 0))
+                    channels = int(streams[0].get('channels', 0))
+                    if sample_rate == 16000 and channels == 1:
+                        return False
+        except:
+            pass
+    return True
 
 class AudioVideoTranscriber:
     def __init__(self, elevenlabs_api_key: str):
         self.elevenlabs_api_key = elevenlabs_api_key.strip() if elevenlabs_api_key and isinstance(elevenlabs_api_key, str) else None
 
-    def convert_to_wav(self, input_path: str, output_path: str) -> bool:
-       
+    def convert_to_wav(self, input_path: str, output_path: str, progress_bar=None, status_text=None) -> bool:
+        """Convert audio/video to optimized WAV format with progress tracking"""
+        # Optimized ffmpeg command for faster conversion
         cmd = [
             "ffmpeg", "-y", "-i", input_path,
-            "-vn", "-acodec", "pcm_s16le",
-            "-ar", "16000", "-ac", "1",
+            "-vn",  # No video
+            "-acodec", "pcm_s16le",  # PCM 16-bit
+            "-ar", "16000",  # 16kHz sample rate
+            "-ac", "1",  # Mono
+            "-threads", "0",  # Use all available threads
+            "-loglevel", "error",  # Reduce logging overhead
             output_path
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=True)
-            return os.path.exists(output_path) and os.path.getsize(output_path) > 1024
-        except subprocess.CalledProcessError as e:
-            st.error(f"FFmpeg conversion failed: {e.stderr}")
+            start_time = time.time()
+            if progress_bar:
+                progress_bar.progress(0.1)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
+                elapsed = time.time() - start_time
+                if status_text:
+                    status_text.text(f"✅ Conversion completed in {elapsed:.1f}s")
+                if progress_bar:
+                    progress_bar.progress(0.2)
+                return True
+            else:
+                if status_text:
+                    status_text.text(f"❌ Conversion failed: {result.stderr[:200]}")
+                return False
+        except subprocess.TimeoutExpired:
+            if status_text:
+                status_text.text("❌ Conversion timed out")
             return False
         except Exception as e:
-            st.error(f"Conversion error: {e}")
+            if status_text:
+                status_text.text(f"❌ Conversion error: {str(e)[:200]}")
             return False
 
-    def transcribe_with_elevenlabs(self, audio_wav_path: str):
-        """"""
+    def transcribe_with_elevenlabs(self, audio_wav_path: str, progress_bar=None, status_text=None, start_progress=0.2):
+        """Transcribe using ElevenLabs Speech-to-Text API with progress tracking"""
         url = "https://api.elevenlabs.io/v1/speech-to-text"
         headers = {
             "xi-api-key": self.elevenlabs_api_key
@@ -74,68 +122,91 @@ class AudioVideoTranscriber:
         
         try:
             size_mb = os.path.getsize(audio_wav_path) / (1024 * 1024)
-            st.info(f"File size: {size_mb:.2f} MB")
+            file_duration = self._estimate_duration(audio_wav_path)
             
-            with st.spinner(f"Transcribing {size_mb:.2f} MB with ElevenLabs..."):
-                with open(audio_wav_path, "rb") as audio_file:
-                    files = {
-                        'file': ('audio.wav', audio_file, 'audio/wav')
-                    }
-                    data = {
-                        'model_id': 'scribe_v2'  # Valid models: scribe_v1, scribe_v1_experimental, scribe_v2
-                    }
-                    
-                    response = requests.post(url, headers=headers, files=files, data=data, timeout=900)
-                    
-                    if response.status_code != 200:
-                        error_text = response.text[:500]
-                        try:
-                            error_json = response.json()
-                            error_text = str(error_json)
-                            # Check for permission errors
-                            if response.status_code == 401:
-                                detail = error_json.get('detail', {})
-                                if detail.get('status') == 'missing_permissions':
-                                    return {
-                                        "success": False, 
-                                        "error": f"ElevenLabs API Error: Your API key doesn't have 'speech_to_text' permission. This feature requires a paid ElevenLabs subscription."
-                                    }
-                        except:
-                            pass
-                        return {"success": False, "error": f"ElevenLabs API returned {response.status_code}: {error_text}"}
-                    
-                    result = response.json()
+            # Progress range: start_progress to 1.0 (80% of total progress for transcription)
+            progress_range = 1.0 - start_progress
+            
+            if status_text:
+                status_text.text(f"📤 Uploading {size_mb:.2f} MB to ElevenLabs...")
+            if progress_bar:
+                progress_bar.progress(start_progress + progress_range * 0.1)
+            
+            start_time = time.time()
+            
+            with open(audio_wav_path, "rb") as audio_file:
+                files = {
+                    'file': ('audio.wav', audio_file, 'audio/wav')
+                }
+                data = {
+                    'model_id': 'scribe_v2'
+                }
+                
+                if status_text:
+                    status_text.text(f"🔄 Transcribing with ElevenLabs (estimated {file_duration:.0f}s audio)...")
+                if progress_bar:
+                    progress_bar.progress(start_progress + progress_range * 0.3)
+                
+                response = requests.post(url, headers=headers, files=files, data=data, timeout=900)
+                
+                if progress_bar:
+                    progress_bar.progress(start_progress + progress_range * 0.7)
+                
+                if response.status_code != 200:
+                    error_text = response.text[:500]
+                    try:
+                        error_json = response.json()
+                        error_text = str(error_json)
+                        if response.status_code == 401:
+                            detail = error_json.get('detail', {})
+                            if detail.get('status') == 'missing_permissions':
+                                return {
+                                    "success": False, 
+                                    "error": f"ElevenLabs API Error: Your API key doesn't have 'speech_to_text' permission. This feature requires a paid ElevenLabs subscription."
+                                }
+                    except:
+                        pass
+                    return {"success": False, "error": f"ElevenLabs API returned {response.status_code}: {error_text}"}
+                
+                result = response.json()
+                
+                if progress_bar:
+                    progress_bar.progress(start_progress + progress_range * 0.85)
 
-            # Parse ElevenLabs response - it can return different formats
+            # Parse ElevenLabs response
             full_text = ""
             words = []
             segments = []
             
-            # Check if response has 'text' field (simple format)
             if "text" in result:
                 full_text = result.get("text", "").strip()
             
-            # Check if response has 'words' array (word-level timestamps)
             if "words" in result and isinstance(result["words"], list):
                 words = result["words"]
-                # Reconstruct full text from words
                 full_text = " ".join([word.get("text", "") for word in words if word.get("text")])
             
-            # If no words array, try to get text from other fields
             if not full_text:
                 full_text = result.get("transcription", "").strip()
             
             if not full_text:
                 full_text = str(result).strip()
 
-            # Format timestamped transcript
+            if status_text:
+                status_text.text("📝 Processing timestamps...")
+            if progress_bar:
+                progress_bar.progress(start_progress + progress_range * 0.95)
+
+            # Improved timestamp formatting with better segmentation
             timestamped_lines = []
             
             if words:
-                # Group words into segments (by sentence or time gaps)
+                # Smart segmentation: group by natural pauses and sentence boundaries
                 current_segment = []
                 current_start = None
                 current_end = None
+                current_speaker = None
+                pause_threshold = 1.0  # 1 second pause creates new segment
+                max_segment_duration = 10.0  # Max 10 seconds per segment
                 
                 for word_info in words:
                     word_text = word_info.get("text", "").strip()
@@ -146,31 +217,45 @@ class AudioVideoTranscriber:
                     if not word_text:
                         continue
                     
-                    # Start new segment if this is the first word or if there's a significant gap (>2 seconds)
-                    if current_start is None or (word_start - current_end) > 2.0:
+                    # Check for new segment conditions
+                    gap = word_start - current_end if current_end is not None else 0
+                    segment_duration = (current_end - current_start) if current_start is not None else 0
+                    speaker_changed = (speaker_id is not None and current_speaker is not None and speaker_id != current_speaker)
+                    
+                    should_start_new = (
+                        current_start is None or  # First word
+                        gap > pause_threshold or  # Significant pause
+                        segment_duration > max_segment_duration or  # Segment too long
+                        speaker_changed  # Speaker changed
+                    )
+                    
+                    if should_start_new:
                         # Save previous segment
                         if current_segment and current_start is not None:
                             segment_text = " ".join(current_segment)
                             start_str = format_timestamp(current_start)
                             end_str = format_timestamp(current_end)
-                            speaker_tag = f" [Speaker {speaker_id}]" if speaker_id is not None else ""
+                            speaker_tag = f" [Speaker {current_speaker}]" if current_speaker is not None else ""
                             timestamped_lines.append(f"[{start_str} - {end_str}]{speaker_tag} {segment_text}")
                         
                         # Start new segment
                         current_segment = [word_text]
                         current_start = word_start
                         current_end = word_end
+                        current_speaker = speaker_id
                     else:
                         # Add to current segment
                         current_segment.append(word_text)
                         current_end = word_end
+                        if speaker_id is not None:
+                            current_speaker = speaker_id
                 
                 # Add last segment
                 if current_segment and current_start is not None:
                     segment_text = " ".join(current_segment)
                     start_str = format_timestamp(current_start)
                     end_str = format_timestamp(current_end)
-                    speaker_tag = f" [Speaker {speaker_id}]" if speaker_id is not None else ""
+                    speaker_tag = f" [Speaker {current_speaker}]" if current_speaker is not None else ""
                     timestamped_lines.append(f"[{start_str} - {end_str}]{speaker_tag} {segment_text}")
                 
                 # Create segments list for JSON output
@@ -184,11 +269,17 @@ class AudioVideoTranscriber:
                             "speaker_id": word_info.get("speaker_id")
                         })
             else:
-                # Fallback: if no word-level timestamps, create a single entry
                 timestamped_lines.append(f"[00:00.000 - 00:00.000] {full_text}")
                 segments = [{"start": 0, "end": 0, "text": full_text}]
 
             timestamped_transcript = "\n".join(timestamped_lines)
+            
+            elapsed = time.time() - start_time
+            
+            if status_text:
+                status_text.text(f"✅ Transcription completed in {elapsed:.1f}s")
+            if progress_bar:
+                progress_bar.progress(1.0)
 
             return {
                 "success": True,
@@ -210,32 +301,71 @@ class AudioVideoTranscriber:
             return {"success": False, "error": f"Request failed: {str(e)}"}
         except Exception as e:
             return {"success": False, "error": f"Error: {str(e)}"}
+    
+    def _estimate_duration(self, audio_path: str) -> float:
+        """Estimate audio duration using ffprobe"""
+        try:
+            cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
+                   '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return float(result.stdout.strip())
+        except:
+            pass
+        return 0.0
 
-    def transcribe_file(self, file_path: str, original_name: str):
+    def transcribe_file(self, file_path: str, original_name: str, progress_bar=None, status_text=None):
+        """Main transcription method with progress tracking"""
         if not os.path.exists(file_path):
             return {"success": False, "error": f"File not found: {file_path}"}
         
         temp_wav = None
 
         try:
-            temp_wav = os.path.join(tempfile.gettempdir(), f"transcribe_{os.getpid()}_{os.urandom(4).hex()}.wav")
+            # Check if conversion is needed
+            needs_conv = needs_conversion(file_path)
             
-            with st.spinner("Converting to WAV format..."):
-                if not self.convert_to_wav(file_path, temp_wav):
+            if needs_conv:
+                temp_wav = os.path.join(tempfile.gettempdir(), f"transcribe_{os.getpid()}_{os.urandom(4).hex()}.wav")
+                
+                if status_text:
+                    status_text.text("🔄 Converting to optimized audio format...")
+                if progress_bar:
+                    progress_bar.progress(0.05)
+                
+                if not self.convert_to_wav(file_path, temp_wav, progress_bar, status_text):
                     return {"success": False, "error": "Failed to convert file to WAV. Make sure ffmpeg is installed and the file is valid."}
 
-            if not os.path.exists(temp_wav) or os.path.getsize(temp_wav) < 1024:
-                return {"success": False, "error": "Converted WAV file is invalid or too small"}
+                if not os.path.exists(temp_wav) or os.path.getsize(temp_wav) < 1024:
+                    return {"success": False, "error": "Converted WAV file is invalid or too small"}
+                
+                audio_file = temp_wav
+                conversion_done = True
+            else:
+                # File is already in correct format
+                if status_text:
+                    status_text.text("✅ File format is already optimized, skipping conversion...")
+                if progress_bar:
+                    progress_bar.progress(0.2)
+                audio_file = file_path
+                conversion_done = False
 
             if not self.elevenlabs_api_key:
                 return {"success": False, "error": "ElevenLabs API key not configured"}
             
-            return self.transcribe_with_elevenlabs(temp_wav)
+            # Adjust progress start based on whether conversion happened
+            if conversion_done:
+                # Conversion took us to 0.2, transcription starts from there
+                return self.transcribe_with_elevenlabs(audio_file, progress_bar, status_text, start_progress=0.2)
+            else:
+                # No conversion, transcription starts from 0.2
+                return self.transcribe_with_elevenlabs(audio_file, progress_bar, status_text, start_progress=0.2)
 
         except Exception as e:
             return {"success": False, "error": f"Transcription error: {str(e)}"}
         finally:
-            cleanup_file(temp_wav)
+            if temp_wav:
+                cleanup_file(temp_wav)
 
 
 # ========================== Streamlit UI ==========================
@@ -273,8 +403,11 @@ if uploaded_file:
 
         transcriber = AudioVideoTranscriber(elevenlabs_api_key=elevenlabs_key)
         
-        with st.spinner("Converting and transcribing..."):
-            result = transcriber.transcribe_file(temp_file_path, uploaded_file.name)
+        # Progress tracking
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        result = transcriber.transcribe_file(temp_file_path, uploaded_file.name, progress_bar, status_text)
 
         if result["success"]:
             st.success("✅ Transcription completed successfully!")
