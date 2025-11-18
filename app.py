@@ -7,6 +7,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 import requests
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 
